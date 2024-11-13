@@ -1,3 +1,127 @@
+public class OpportunityHelper {
+    
+    public static void processOpportunities(List<Opportunity> oppList) {
+        Set<String> emails = new Set<String>();
+        Set<String> phones = new Set<String>();
+        
+        // Collect emails and phones from Opportunity records
+        for (Opportunity opp : oppList) {
+            emails.add(opp.Email__c);
+            phones.add(opp.Phone__c);
+        }
+        
+        // Fetch Leads with matching email or phone
+        Map<String, Lead> leadsByEmail = new Map<String, Lead>();
+        Map<String, Lead> leadsByPhone = new Map<String, Lead>();
+        
+        List<Lead> matchingLeads = [SELECT Id, Email, Phone, Status FROM Lead 
+                                    WHERE (Email IN :emails OR Phone IN :phones) 
+                                    AND Status != 'Converted'];
+        
+        for (Lead lead : matchingLeads) {
+            if (lead.Email != null) leadsByEmail.put(lead.Email, lead);
+            if (lead.Phone != null) leadsByPhone.put(lead.Phone, lead);
+        }
+        
+        // Process each Opportunity
+        for (Opportunity opp : oppList) {
+            Lead matchingLead = leadsByEmail.get(opp.Email__c) != null ? 
+                                leadsByEmail.get(opp.Email__c) : 
+                                leadsByPhone.get(opp.Phone__c);
+            
+            if (matchingLead != null) {
+                // Convert Lead to Account and Contact if found
+                convertLeadToAccountAndContact(matchingLead, opp);
+            } else {
+                // Create new Account and Contact if no matching Lead found
+                createAccountAndContactFromOpportunity(opp);
+            }
+        }
+    }
+    
+    private static void convertLeadToAccountAndContact(Lead lead, Opportunity opp) {
+        Database.LeadConvert lc = new Database.LeadConvert();
+        lc.setLeadId(lead.Id);
+        lc.setConvertedStatus('Closed - Converted');  
+        lc.setDoNotCreateOpportunity(true);
+        
+        // Create a new Account and set its RecordTypeId
+        Account newAccount = new Account();
+        newAccount.Name = opp.Customer_Name__c;
+        
+        // Query and set the RecordTypeId based on Opportunity RecordType
+        Id recordTypeId = getRecordTypeId('Account', opp.RecordType.DeveloperName);
+        if (recordTypeId == null) {
+            System.debug('No valid RecordTypeId found for ' + opp.RecordType.DeveloperName);
+            return;
+        }
+        newAccount.RecordTypeId = recordTypeId;
+        
+        try {
+            insert newAccount;
+            System.debug('Account inserted: ' + newAccount.Id);
+        } catch (DmlException e) {
+            System.debug('Failed to insert Account: ' + e.getMessage());
+            return;
+        }
+        
+        lc.setAccountId(newAccount.Id);
+        
+        Database.LeadConvertResult lcr = Database.convertLead(lc);
+        
+        // Link Opportunity to the newly created Account and Contact
+        if (lcr.isSuccess()) {
+            opp.AccountId = lcr.getAccountId();
+            opp.ContactId = lcr.getContactId();
+        } else {
+            System.debug('Lead conversion failed: ' + lcr.getErrors());
+        }
+    }
+    
+    private static void createAccountAndContactFromOpportunity(Opportunity opp) {
+        String recordTypeName = Schema.SObjectType.Opportunity.getRecordTypeInfosById().get(opp.RecordTypeId).getDeveloperName();
+        
+        Account account = new Account();
+        account.Name = opp.Customer_Name__c != null ? opp.Customer_Name__c : 'default';
+        account.RecordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByName().get(recordTypeName).getRecordTypeId();
+        
+        try {
+            insert account;
+            System.debug('Account inserted: ' + account.Id);
+        } catch (DmlException e) {
+            System.debug('Failed to insert Account: ' + e.getMessage());
+            return;
+        }
+        
+        Contact contact = new Contact();
+        contact.AccountId = account.Id;
+        contact.LastName = opp.Customer_Name__c;
+        contact.Email = opp.Email__c;
+        contact.Phone = opp.Phone__c;
+        
+        try {
+            insert contact;
+            System.debug('Contact inserted: ' + contact.Id);
+        } catch (DmlException e) {
+            System.debug('Failed to insert Contact: ' + e.getMessage());
+            return;
+        }
+        
+        opp.AccountId = account.Id;
+        opp.ContactId = contact.Id;
+    }
+    
+    private static Id getRecordTypeId(String sObjectType, String recordTypeName) {
+        try {
+            return [SELECT Id FROM RecordType 
+                    WHERE SObjectType = :sObjectType 
+                    AND DeveloperName = :recordTypeName LIMIT 1].Id;
+        } catch (QueryException e) {
+            System.debug('No record type found for ' + sObjectType + ' with DeveloperName ' + recordTypeName);
+            return null;
+        }
+    }
+}
 public class OpportunityHandler {
     public static void processOpportunities(List<Opportunity> oppList) {
         Set<String> emails = new Set<String>();
